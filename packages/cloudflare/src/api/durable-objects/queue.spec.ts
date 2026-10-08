@@ -193,6 +193,59 @@ describe("DurableObjectQueue", () => {
 		});
 	});
 
+	describe("failed state cleanup", () => {
+		// A route that leaves the failed state must be deleted from the persisted state too,
+		// otherwise `initState()` restores the row on the next durable object start and
+		// `alarm()` replays a revalidation for a route that is no longer failing.
+		const expectDeleted = (queue: DOQueueHandler, id: string) => {
+			expect(queue.routeInFailedState.has(id)).toBe(false);
+			expect(queue.sql.exec).toHaveBeenCalledWith("DELETE FROM failed_state WHERE id = ?", id);
+		};
+
+		it("should delete the persisted failed state when the route revalidates successfully", async () => {
+			const queue = createDurableObjectQueue({ fetchDuration: 10 });
+			await queue.addToFailedState(createMessage("id"));
+
+			await queue.executeRevalidation(createMessage("id"));
+
+			expectDeleted(queue, "id");
+		});
+
+		it("should delete the persisted failed state when the route is not found", async () => {
+			const queue = createDurableObjectQueue({ fetchDuration: 10, statusCode: 404 });
+			await queue.addToFailedState(createMessage("id"));
+
+			await queue.executeRevalidation(createMessage("id"));
+
+			expectDeleted(queue, "id");
+		});
+
+		it("should delete the persisted failed state when the revalidation hits the FatalError branch", async () => {
+			const queue = createDurableObjectQueue({
+				fetchDuration: 10,
+				statusCode: 200,
+				headers: new Headers([["x-nextjs-cache", "MISS"]]),
+			});
+			await queue.addToFailedState(createMessage("id"));
+
+			await queue.executeRevalidation(createMessage("id"));
+
+			expectDeleted(queue, "id");
+		});
+
+		it("should delete the persisted failed state once the maximum number of retries is reached", async () => {
+			const queue = createDurableObjectQueue({ fetchDuration: 10 });
+			for (let i = 0; i < 6; i++) {
+				await queue.addToFailedState(createMessage("id"));
+			}
+			expect(queue.routeInFailedState.has("id")).toBe(true);
+
+			await queue.addToFailedState(createMessage("id"));
+
+			expectDeleted(queue, "id");
+		});
+	});
+
 	describe("addAlarm", () => {
 		const getStorage = (queue: DOQueueHandler): DurableObjectStorage => {
 			// @ts-expect-error - ctx is a protected field
@@ -344,6 +397,14 @@ describe("DurableObjectQueue", () => {
 		it("should not write to sql on successful revalidation", async () => {
 			const queue = createDurableObjectQueue({ fetchDuration: 10, disableSQLite: true });
 			await queue.revalidate(createMessage("id"));
+			expect(queue.sql.exec).not.toHaveBeenCalled();
+		});
+
+		it("should not delete from sqlite on failed state cleanup", async () => {
+			const queue = createDurableObjectQueue({ fetchDuration: 10, disableSQLite: true });
+			queue.routeInFailedState.set("id", { msg: createMessage("id"), retryCount: 0, nextAlarmMs: 1000 });
+			queue.removeFromFailedState("id");
+			expect(queue.routeInFailedState.has("id")).toBe(false);
 			expect(queue.sql.exec).not.toHaveBeenCalled();
 		});
 	});
