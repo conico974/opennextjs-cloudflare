@@ -71,7 +71,15 @@ class StaticAssetsIncrementalCache implements IncrementalCache {
 				? `${CACHE_DIR}/__fetch/${buildId}/${key}`
 				: `${CACHE_DIR}/${buildId}/${key}.cache`
 		).replace(/\/+/g, "/");
-		return `http://assets.local/${name}`;
+		// Encode each path segment. Since Next.js 15.5.27 / 16.3.8 cache keys
+		// contain a literal `$` segment (`/route-cache/<kind>/<sha>/$<path>`).
+		// The Workers asset server canonicalises the decoded path with
+		// `encodeURIComponent` per segment and answers a **307** redirect when
+		// that differs from the request path, so an unencoded `$` makes
+		// `assets.fetch` return a non-ok response in production (it follows the
+		// redirect in local dev, which is why `preview` hides the bug).
+		const encodedName = name.split("/").map(encodeURIComponent).join("/");
+		return `http://assets.local/${encodedName}`;
 	}
 }
 
